@@ -10,33 +10,41 @@ export default async function handler(req, res) {
     const endDate = new Date().toISOString().split('T')[0]
     const startDate = '2020-01-01'
 
-    // Fetch audience retention (elapsedVideoTimeRatio = 0 to 1, audienceWatchFraction = % remaining)
-    const res1 = await fetch(
-      `https://youtubeanalytics.googleapis.com/v2/reports?ids=channel==${channel_id}&startDate=${startDate}&endDate=${endDate}&metrics=audienceWatchFraction&dimensions=elapsedVideoTimeRatio&filters=video==${video_id}&maxResults=100`,
-      { headers: { Authorization: `Bearer ${access_token}` } }
-    )
+    // Correct metric: audienceWatchRatio (not audienceWatchFraction)
+    // elapsedVideoTimeRatio is the dimension (0.0 to 1.0)
+    const url = `https://youtubeanalytics.googleapis.com/v2/reports?ids=channel==${channel_id}&startDate=${startDate}&endDate=${endDate}&metrics=audienceWatchRatio&dimensions=elapsedVideoTimeRatio&filters=video==${video_id}&maxResults=100`
+
+    const res1 = await fetch(url, {
+      headers: { Authorization: `Bearer ${access_token}` }
+    })
 
     const data = await res1.json()
 
-    if (!res1.ok || !data.rows) {
-      return res.status(200).json({ retention: null, error: data.error?.message || 'No retention data' })
+    if (!res1.ok) {
+      return res.status(200).json({ retention: null, error: data.error?.message || `API error ${res1.status}` })
     }
 
-    // Convert to array of { time: 0-100%, retention: 0-100% }
+    if (!data.rows || data.rows.length === 0) {
+      return res.status(200).json({ retention: null, error: 'No retention data available for this video yet' })
+    }
+
+    // Convert to percentage points
     const retention = data.rows.map(row => ({
-      timePercent: Math.round(row[0] * 100),
-      retentionPercent: Math.round(row[1] * 100)
-    }))
+      timePercent: Math.round(parseFloat(row[0]) * 100),
+      retentionPercent: Math.round(parseFloat(row[1]) * 100)
+    })).sort((a, b) => a.timePercent - b.timePercent)
 
     // Calculate key signals
-    const first30s = retention.filter(r => r.timePercent <= 10) // first 10% of video ≈ first 30s for avg 5min video
-    const introDrop = first30s.length >= 2
-      ? first30s[0].retentionPercent - first30s[first30s.length - 1].retentionPercent
+    const introPoints = retention.filter(r => r.timePercent <= 15)
+    const introDrop = introPoints.length >= 2
+      ? introPoints[0].retentionPercent - introPoints[introPoints.length - 1].retentionPercent
       : null
 
-    const avgRetention = Math.round(retention.reduce((s, r) => s + r.retentionPercent, 0) / retention.length)
+    const avgRetention = Math.round(
+      retention.reduce((s, r) => s + r.retentionPercent, 0) / retention.length
+    )
 
-    // Find biggest single drop
+    // Find biggest single drop point
     let biggestDrop = { drop: 0, timePercent: 0 }
     for (let i = 1; i < retention.length; i++) {
       const drop = retention[i - 1].retentionPercent - retention[i].retentionPercent
