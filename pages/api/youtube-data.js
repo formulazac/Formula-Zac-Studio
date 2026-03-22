@@ -14,32 +14,6 @@ export default async function handler(req, res) {
     const channelId = channelData.items?.[0]?.id
     if (!channelId) return res.status(400).json({ error: 'No channel found' })
 
-    // Get analytics for ALL videos at once — no filter, just sort by views, get top 200
-    // This is the reliable approach — single call, returns all video analytics
-    const endDate = new Date().toISOString().split('T')[0]
-    const analyticsRes = await fetch(
-      `https://youtubeanalytics.googleapis.com/v2/reports?ids=channel==${channelId}&startDate=2020-01-01&endDate=${endDate}&metrics=views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,impressions,impressionClickThroughRate&dimensions=video&maxResults=200&sort=-views`,
-      { headers: { Authorization: `Bearer ${access_token}` } }
-    )
-    const analyticsData = await analyticsRes.json()
-
-    // Build analytics map — use column index approach for reliability
-    const analyticsMap = {}
-    if (analyticsData.rows && analyticsData.columnHeaders) {
-      const cols = analyticsData.columnHeaders.map(h => h.name)
-      analyticsData.rows.forEach(row => {
-        const videoId = row[0] // first column is always 'video' dimension
-        if (!videoId) return
-        const obj = {}
-        cols.forEach((col, i) => { obj[col] = row[i] })
-        analyticsMap[videoId] = obj
-      })
-    }
-
-    console.log(`Analytics API returned ${Object.keys(analyticsMap).length} video rows`)
-    console.log(`Analytics error:`, analyticsData.error || 'none')
-    console.log(`Column headers:`, analyticsData.columnHeaders?.map(h => h.name))
-
     // Get video list with pagination
     let allVideoIds = []
     let pageToken = ''
@@ -82,12 +56,40 @@ export default async function handler(req, res) {
       })
     }
 
+    // Get analytics — log full response for debugging
+    const endDate = new Date().toISOString().split('T')[0]
+    const analyticsUrl = `https://youtubeanalytics.googleapis.com/v2/reports?ids=channel==${channelId}&startDate=2020-01-01&endDate=${endDate}&metrics=views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,impressions,impressionClickThroughRate&dimensions=video&maxResults=200&sort=-views`
+    
+    const analyticsRes = await fetch(analyticsUrl, {
+      headers: { Authorization: `Bearer ${access_token}` }
+    })
+    const analyticsData = await analyticsRes.json()
+
+    // Log everything for debugging
+    console.log('Analytics status:', analyticsRes.status)
+    console.log('Analytics error:', JSON.stringify(analyticsData.error))
+    console.log('Analytics columns:', JSON.stringify(analyticsData.columnHeaders?.map(h => h.name)))
+    console.log('Analytics row count:', analyticsData.rows?.length || 0)
+    console.log('Analytics first row:', JSON.stringify(analyticsData.rows?.[0]))
+
+    // Build analytics map
+    const analyticsMap = {}
+    if (analyticsData.rows?.length && analyticsData.columnHeaders) {
+      const cols = analyticsData.columnHeaders.map(h => h.name)
+      analyticsData.rows.forEach(row => {
+        const videoId = row[0]
+        if (!videoId) return
+        const obj = {}
+        cols.forEach((col, i) => { obj[col] = row[i] })
+        analyticsMap[videoId] = obj
+      })
+    }
+
     // Merge
     const videos = Object.entries(statsMap).map(([id, v]) => {
       const a = analyticsMap[id] || {}
       const ctrRaw = parseFloat(a.impressionClickThroughRate || 0)
       const ctr = parseFloat((ctrRaw > 1 ? ctrRaw : ctrRaw * 100).toFixed(2))
-      const avgPct = parseFloat(parseFloat(a.averageViewPercentage || 0).toFixed(2))
 
       return {
         id,
@@ -95,7 +97,7 @@ export default async function handler(req, res) {
         thumbnailUrl: v.thumbnailUrl || `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
         impressions: parseInt(a.impressions || 0),
         ctr,
-        avgPctViewed: avgPct,
+        avgPctViewed: parseFloat(parseFloat(a.averageViewPercentage || 0).toFixed(2)),
         avgViewDuration: parseFloat(a.averageViewDuration || 0),
         watchHours: parseFloat(((parseFloat(a.estimatedMinutesWatched || 0)) / 60).toFixed(1)),
         subscribers: 0,
@@ -105,10 +107,16 @@ export default async function handler(req, res) {
       }
     })
 
-    const withAnalytics = videos.filter(v => v.ctr > 0 || v.avgPctViewed > 0).length
-    console.log(`Total videos: ${videos.length}, with analytics data: ${withAnalytics}`)
-
-    res.status(200).json({ videos, channelId })
+    res.status(200).json({ 
+      videos, 
+      channelId,
+      _debug: {
+        analyticsStatus: analyticsRes.status,
+        analyticsError: analyticsData.error || null,
+        analyticsRows: analyticsData.rows?.length || 0,
+        analyticsColumns: analyticsData.columnHeaders?.map(h => h.name) || []
+      }
+    })
   } catch (err) {
     console.error('youtube-data error:', err)
     res.status(500).json({ error: err.message })
