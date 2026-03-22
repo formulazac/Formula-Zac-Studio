@@ -5,19 +5,32 @@ export default async function handler(req, res) {
   if (!access_token) return res.status(401).json({ error: 'No access token' })
 
   try {
+    // Get ALL channels for this account, pick the one with most subscribers
     const channelRes = await fetch(
-      'https://www.googleapis.com/youtube/v3/channels?part=id,snippet&mine=true',
+      'https://www.googleapis.com/youtube/v3/channels?part=id,snippet,statistics&mine=true&maxResults=50',
       { headers: { Authorization: `Bearer ${access_token}` } }
     )
     const channelData = await channelRes.json()
-    const channelId = channelData.items?.[0]?.id
-    if (!channelId) return res.status(400).json({ 
-      error: 'No channel found',
-      detail: channelData.error?.message || 'Channel API returned no items',
-      status: channelRes.status
+
+    if (!channelData.items?.length) {
+      return res.status(400).json({ 
+        error: 'No channel found',
+        detail: channelData.error?.message || 'No YouTube channels on this account',
+        status: channelRes.status
+      })
+    }
+
+    // Pick channel with most subscribers (handles multi-channel accounts)
+    const channel = channelData.items.reduce((best, c) => {
+      const subs = parseInt(c.statistics?.subscriberCount || 0)
+      const bestSubs = parseInt(best.statistics?.subscriberCount || 0)
+      return subs > bestSubs ? c : best
     })
 
-    // Get video list
+    const channelId = channel.id
+    const channelTitle = channel.snippet?.title || 'Your Channel'
+
+    // Get video list with pagination
     let allVideoIds = []
     let pageToken = ''
     for (let page = 0; page < 4; page++) {
@@ -29,9 +42,9 @@ export default async function handler(req, res) {
       if (!pageToken) break
     }
 
-    if (!allVideoIds.length) return res.status(200).json({ videos: [], channelId })
+    if (!allVideoIds.length) return res.status(200).json({ videos: [], channelId, channelTitle })
 
-    // Get video details in batches
+    // Get video details in batches of 50
     const statsMap = {}
     for (let i = 0; i < allVideoIds.length; i += 50) {
       const batch = allVideoIds.slice(i, i + 50).join(',')
@@ -100,7 +113,7 @@ export default async function handler(req, res) {
       }
     })
 
-    res.status(200).json({ videos, channelId })
+    res.status(200).json({ videos, channelId, channelTitle })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
