@@ -78,7 +78,7 @@ export default async function handler(req, res) {
         id,
         ...v,
         impressions: analytics.impressions || 0,
-        ctr: parseFloat((analytics.impressionClickThroughRate || 0).toFixed(2)),
+        ctr: parseFloat(((analytics.impressionClickThroughRate || 0) * 100).toFixed(2)),
         avgPctViewed: parseFloat((analytics.averageViewPercentage || 0).toFixed(2)),
         avgViewDuration: analytics.averageViewDuration || 0,
         watchHours: parseFloat(((analytics.estimatedMinutesWatched || 0) / 60).toFixed(1)),
