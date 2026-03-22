@@ -57,7 +57,9 @@ export default async function handler(req, res) {
         views: parseInt(v.statistics?.viewCount || 0),
         likes: parseInt(v.statistics?.likeCount || 0),
         comments: parseInt(v.statistics?.commentCount || 0),
-        isShort: seconds <= 60
+        isShort: seconds <= 60,
+        thumbnailUrl: v.snippet?.thumbnails?.maxres?.url || v.snippet?.thumbnails?.high?.url || v.snippet?.thumbnails?.medium?.url || ''
+
       }
     })
 
@@ -77,6 +79,7 @@ export default async function handler(req, res) {
       return {
         id,
         ...v,
+        thumbnailUrl: v.thumbnailUrl || `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
         impressions: analytics.impressions || 0,
         ctr: parseFloat(((analytics.impressionClickThroughRate || 0) * 100).toFixed(2)),
         avgPctViewed: parseFloat((analytics.averageViewPercentage || 0).toFixed(2)),
