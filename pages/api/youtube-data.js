@@ -14,7 +14,7 @@ export default async function handler(req, res) {
     const channelId = channelData.items?.[0]?.id
     if (!channelId) return res.status(400).json({ error: 'No channel found' })
 
-    // Get videos — fetch up to 200 with pagination
+    // Get videos with pagination
     let allVideoIds = []
     let pageToken = ''
     for (let page = 0; page < 4; page++) {
@@ -58,36 +58,56 @@ export default async function handler(req, res) {
       })
     }
 
-    // Get analytics — CTR, impressions, retention in one call
-    // Split into long form and shorts separately for accuracy
-    const videoIdList = Object.keys(statsMap).join(',')
+    // Get analytics per video — fetch in batches of 200 video IDs
+    const allIds = Object.keys(statsMap)
     const endDate = new Date().toISOString().split('T')[0]
-
-    const analyticsRes = await fetch(
-      `https://youtubeanalytics.googleapis.com/v2/reports?ids=channel==${channelId}&startDate=2020-01-01&endDate=${endDate}&metrics=views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,subscribersGained,impressions,impressionClickThroughRate&dimensions=video&maxResults=200&sort=-views`,
-      { headers: { Authorization: `Bearer ${access_token}` } }
-    )
-    const analyticsData = await analyticsRes.json()
-
-    // Build analytics lookup by video ID
     const analyticsMap = {}
-    if (analyticsData.rows) {
-      // Column headers tell us the order: video, views, estimatedMinutesWatched, etc
-      const cols = analyticsData.columnHeaders?.map(h => h.name) || []
-      analyticsData.rows.forEach(row => {
-        const obj = {}
-        cols.forEach((col, i) => { obj[col] = row[i] })
-        // The video dimension column is named 'video'
-        if (obj.video) analyticsMap[obj.video] = obj
-      })
+
+    // Analytics API accepts comma-separated video IDs in the filters param
+    // but has a limit — do it in chunks of 50
+    for (let i = 0; i < allIds.length; i += 50) {
+      const chunk = allIds.slice(i, i + 50)
+      const filterStr = chunk.map(id => `video==${id}`).join(',')
+      
+      const aRes = await fetch(
+        `https://youtubeanalytics.googleapis.com/v2/reports?ids=channel==${channelId}&startDate=2020-01-01&endDate=${endDate}&metrics=views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,impressions,impressionClickThroughRate&dimensions=video&filters=${encodeURIComponent(filterStr)}&maxResults=50`,
+        { headers: { Authorization: `Bearer ${access_token}` } }
+      )
+      const aData = await aRes.json()
+      
+      if (aData.rows && aData.columnHeaders) {
+        const cols = aData.columnHeaders.map(h => h.name)
+        const videoIdx = cols.indexOf('video')
+        const viewsIdx = cols.indexOf('views')
+        const minutesIdx = cols.indexOf('estimatedMinutesWatched')
+        const avgDurIdx = cols.indexOf('averageViewDuration')
+        const avgPctIdx = cols.indexOf('averageViewPercentage')
+        const impressionsIdx = cols.indexOf('impressions')
+        const ctrIdx = cols.indexOf('impressionClickThroughRate')
+
+        aData.rows.forEach(row => {
+          const vid = row[videoIdx]
+          if (!vid) return
+          analyticsMap[vid] = {
+            views: row[viewsIdx] || 0,
+            estimatedMinutesWatched: row[minutesIdx] || 0,
+            averageViewDuration: row[avgDurIdx] || 0,
+            averageViewPercentage: row[avgPctIdx] || 0,
+            impressions: row[impressionsIdx] || 0,
+            // CTR comes as ratio 0.0-1.0 from API, convert to percentage
+            impressionClickThroughRate: row[ctrIdx] || 0
+          }
+        })
+      }
     }
 
-    // Merge stats + analytics
+    // Merge everything
     const videos = Object.entries(statsMap).map(([id, v]) => {
       const a = analyticsMap[id] || {}
-      // CTR comes as ratio 0-1 from Analytics API, convert to percentage
       const ctrRaw = parseFloat(a.impressionClickThroughRate || 0)
-      const ctr = ctrRaw > 1 ? parseFloat(ctrRaw.toFixed(2)) : parseFloat((ctrRaw * 100).toFixed(2))
+      // Sanity check: if > 1 it's already %, if <= 1 it's a ratio
+      const ctr = parseFloat((ctrRaw > 1 ? ctrRaw : ctrRaw * 100).toFixed(2))
+      const avgPct = parseFloat(parseFloat(a.averageViewPercentage || 0).toFixed(2))
 
       return {
         id,
@@ -95,17 +115,21 @@ export default async function handler(req, res) {
         thumbnailUrl: v.thumbnailUrl || `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
         impressions: parseInt(a.impressions || 0),
         ctr,
-        avgPctViewed: parseFloat(parseFloat(a.averageViewPercentage || 0).toFixed(2)),
+        avgPctViewed: avgPct,
         avgViewDuration: parseFloat(a.averageViewDuration || 0),
         watchHours: parseFloat(((parseFloat(a.estimatedMinutesWatched || 0)) / 60).toFixed(1)),
-        subscribers: parseInt(a.subscribersGained || 0),
+        subscribers: 0,
         revenue: 0,
         transcript: null,
         comments: []
       }
     })
 
-    res.status(200).json({ videos, channelId })
+    // Debug: log how many videos got analytics data
+    const withAnalytics = videos.filter(v => v.ctr > 0 || v.avgPctViewed > 0).length
+    console.log(`Total videos: ${videos.length}, with analytics: ${withAnalytics}, analyticsMap keys: ${Object.keys(analyticsMap).length}`)
+
+    res.status(200).json({ videos, channelId, debug: { totalVideos: videos.length, withAnalytics, analyticsKeys: Object.keys(analyticsMap).length } })
   } catch (err) {
     console.error('youtube-data error:', err)
     res.status(500).json({ error: err.message })
