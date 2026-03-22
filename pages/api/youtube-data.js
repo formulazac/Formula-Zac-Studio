@@ -5,47 +5,19 @@ export default async function handler(req, res) {
   if (!access_token) return res.status(401).json({ error: 'No access token' })
 
   try {
-    // Debug: check what the token gives us
     const channelRes = await fetch(
       'https://www.googleapis.com/youtube/v3/channels?part=id,snippet&mine=true',
       { headers: { Authorization: `Bearer ${access_token}` } }
     )
     const channelData = await channelRes.json()
-    
-    console.log('Channel API status:', channelRes.status)
-    console.log('Channel data:', JSON.stringify(channelData).slice(0, 500))
+    const channelId = channelData.items?.[0]?.id
+    if (!channelId) return res.status(400).json({ 
+      error: 'No channel found',
+      detail: channelData.error?.message || 'Channel API returned no items',
+      status: channelRes.status
+    })
 
-    // Try alternative channel lookup
-    if (!channelData.items?.length) {
-      // Try getting channel via search
-      const searchRes = await fetch(
-        'https://www.googleapis.com/youtube/v3/channels?part=id,snippet&managedByMe=true&mine=true',
-        { headers: { Authorization: `Bearer ${access_token}` } }
-      )
-      const searchData = await searchRes.json()
-      console.log('Alt channel lookup:', JSON.stringify(searchData).slice(0, 300))
-      
-      // Try userinfo to confirm token works at all
-      const userRes = await fetch(
-        'https://www.googleapis.com/oauth2/v2/userinfo',
-        { headers: { Authorization: `Bearer ${access_token}` } }
-      )
-      const userData = await userRes.json()
-      console.log('User info:', JSON.stringify(userData).slice(0, 200))
-      
-      return res.status(400).json({ 
-        error: 'No channel found',
-        channelApiStatus: channelRes.status,
-        channelError: channelData.error,
-        channelItemCount: channelData.items?.length || 0,
-        userEmail: userData.email || 'unknown',
-        tokenValid: !!userData.email
-      })
-    }
-
-    const channelId = channelData.items[0].id
-
-    // Get video list with pagination
+    // Get video list
     let allVideoIds = []
     let pageToken = ''
     for (let page = 0; page < 4; page++) {
@@ -59,7 +31,7 @@ export default async function handler(req, res) {
 
     if (!allVideoIds.length) return res.status(200).json({ videos: [], channelId })
 
-    // Get video details
+    // Get video details in batches
     const statsMap = {}
     for (let i = 0; i < allVideoIds.length; i += 50) {
       const batch = allVideoIds.slice(i, i + 50).join(',')
@@ -95,12 +67,6 @@ export default async function handler(req, res) {
     )
     const analyticsData = await analyticsRes.json()
 
-    console.log('Analytics status:', analyticsRes.status)
-    console.log('Analytics error:', JSON.stringify(analyticsData.error))
-    console.log('Analytics rows:', analyticsData.rows?.length || 0)
-    console.log('Analytics columns:', JSON.stringify(analyticsData.columnHeaders?.map(h => h.name)))
-    console.log('First row:', JSON.stringify(analyticsData.rows?.[0]))
-
     const analyticsMap = {}
     if (analyticsData.rows?.length && analyticsData.columnHeaders) {
       const cols = analyticsData.columnHeaders.map(h => h.name)
@@ -134,19 +100,8 @@ export default async function handler(req, res) {
       }
     })
 
-    res.status(200).json({ 
-      videos, 
-      channelId,
-      _debug: {
-        analyticsStatus: analyticsRes.status,
-        analyticsError: analyticsData.error || null,
-        analyticsRows: analyticsData.rows?.length || 0,
-        analyticsColumns: analyticsData.columnHeaders?.map(h => h.name) || [],
-        firstRow: analyticsData.rows?.[0] || null
-      }
-    })
+    res.status(200).json({ videos, channelId })
   } catch (err) {
-    console.error('youtube-data error:', err)
     res.status(500).json({ error: err.message })
   }
 }
