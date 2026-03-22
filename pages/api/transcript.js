@@ -1,67 +1,20 @@
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' })
 
-  const { videoId } = req.query
+  const { videoId, access_token } = req.query
   if (!videoId) return res.status(400).json({ error: 'Missing videoId' })
 
-  // Try YouTube's own timedtext API first (free, no auth needed, server-side so no CORS)
-  const attempts = [
-    `https://www.youtube.com/api/timedtext?v=${videoId}&lang=en&fmt=json3`,
-    `https://www.youtube.com/api/timedtext?v=${videoId}&lang=en-US&fmt=json3`,
-    `https://www.youtube.com/api/timedtext?v=${videoId}&lang=en&fmt=json3&kind=asr`, // auto-generated
-    `https://video.google.com/timedtext?lang=en&v=${videoId}`, // fallback XML endpoint
-  ]
-
-  for (const url of attempts) {
+  // Try YouTube Captions API first (if user is logged in with OAuth)
+  if (access_token) {
     try {
-      const ytRes = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': 'application/json, text/xml, */*'
-        }
-      })
-
-      if (!ytRes.ok) continue
-      const contentType = ytRes.headers.get('content-type') || ''
-
-      // Handle JSON3 format
-      if (contentType.includes('json') || url.includes('fmt=json3')) {
-        const text = await ytRes.text()
-        if (!text || text.length < 20) continue
-        try {
-          const data = JSON.parse(text)
-          const transcript = data.events
-            ?.filter(e => e.segs)
-            ?.map(e => e.segs.map(s => s.utf8 || '').join(''))
-            ?.join(' ')
-            ?.replace(/\s+/g, ' ')
-            ?.trim()
-          if (transcript && transcript.length > 50) {
-            return res.status(200).json({ content: transcript })
-          }
-        } catch(e) { continue }
-      }
-
-      // Handle XML format
-      if (contentType.includes('xml') || url.includes('timedtext?lang')) {
-        const xml = await ytRes.text()
-        if (!xml || xml.length < 50) continue
-        const texts = xml.match(/<text[^>]*>([^<]*)<\/text>/g)
-        if (texts && texts.length > 0) {
-          const transcript = texts
-            .map(t => t.replace(/<[^>]+>/g, '').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&#39;/g,"'").replace(/&quot;/g,'"'))
-            .join(' ')
-            .replace(/\s+/g, ' ')
-            .trim()
-          if (transcript.length > 50) {
-            return res.status(200).json({ content: transcript })
-          }
-        }
-      }
-    } catch(e) { continue }
+      const transcript = await getTranscriptViaAPI(videoId, access_token)
+      if (transcript) return res.status(200).json({ content: transcript })
+    } catch(e) {
+      console.log('Captions API failed:', e.message)
+    }
   }
 
-  // Fallback to Supadata if YouTube's own API fails and key is configured
+  // Fallback to Supadata
   if (process.env.SUPADATA_API_KEY) {
     try {
       const ytUrl = encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)
@@ -71,12 +24,60 @@ export default async function handler(req, res) {
       )
       if (sRes.ok) {
         const data = await sRes.json()
-        let text = typeof data.content === 'string' ? data.content :
+        const text = typeof data.content === 'string' ? data.content :
           Array.isArray(data.content) ? data.content.map(s => s.text || '').join(' ') : ''
-        if (text.length > 50) return res.status(200).json({ content: text })
+        if (text.length > 50) return res.status(200).json({ content: text.trim() })
       }
-    } catch(e) {}
+    } catch(e) {
+      console.log('Supadata failed:', e.message)
+    }
   }
 
-  res.status(404).json({ error: 'No transcript available for this video' })
+  res.status(404).json({ error: 'No transcript available' })
+}
+
+async function getTranscriptViaAPI(videoId, accessToken) {
+  // Step 1: List available caption tracks
+  const listRes = await fetch(
+    `https://www.googleapis.com/youtube/v3/captions?part=snippet&videoId=${videoId}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  )
+
+  if (!listRes.ok) throw new Error(`Caption list failed: ${listRes.status}`)
+  const listData = await listRes.json()
+
+  if (!listData.items || listData.items.length === 0) {
+    throw new Error('No caption tracks found')
+  }
+
+  // Prefer: manual English > auto-generated English > any English > first available
+  const tracks = listData.items
+  const preferred =
+    tracks.find(t => t.snippet.language === 'en' && t.snippet.trackKind === 'standard') ||
+    tracks.find(t => t.snippet.language === 'en' && t.snippet.trackKind === 'asr') ||
+    tracks.find(t => t.snippet.language?.startsWith('en')) ||
+    tracks[0]
+
+  if (!preferred) throw new Error('No suitable caption track')
+
+  // Step 2: Download the caption file
+  const dlRes = await fetch(
+    `https://www.googleapis.com/youtube/v3/captions/${preferred.id}?tfmt=srt`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  )
+
+  if (!dlRes.ok) throw new Error(`Caption download failed: ${dlRes.status}`)
+
+  const srtText = await dlRes.text()
+  if (!srtText || srtText.length < 20) throw new Error('Empty caption file')
+
+  // Parse SRT format to plain text
+  const plainText = srtText
+    .replace(/\d+\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}\n/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\n+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return plainText
 }
