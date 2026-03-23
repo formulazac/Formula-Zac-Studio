@@ -5,9 +5,9 @@ export default async function handler(req, res) {
   if (!access_token) return res.status(401).json({ error: 'No access token' })
 
   try {
-    // Get ALL channels for this account, pick the one with most subscribers
+    // Get ALL channels, pick the one with most subscribers (1 unit)
     const channelRes = await fetch(
-      'https://www.googleapis.com/youtube/v3/channels?part=id,snippet,statistics&mine=true&maxResults=50',
+      'https://www.googleapis.com/youtube/v3/channels?part=id,snippet,statistics,contentDetails&mine=true&maxResults=50',
       { headers: { Authorization: `Bearer ${access_token}` } }
     )
     const channelData = await channelRes.json()
@@ -20,31 +20,39 @@ export default async function handler(req, res) {
       })
     }
 
-    // Pick channel with most subscribers (handles multi-channel accounts)
+    // Pick channel with most subscribers
     const channel = channelData.items.reduce((best, c) => {
-      const subs = parseInt(c.statistics?.subscriberCount || 0)
-      const bestSubs = parseInt(best.statistics?.subscriberCount || 0)
-      return subs > bestSubs ? c : best
+      return parseInt(c.statistics?.subscriberCount || 0) > parseInt(best.statistics?.subscriberCount || 0) ? c : best
     })
 
     const channelId = channel.id
     const channelTitle = channel.snippet?.title || 'Your Channel'
+    
+    // Get the uploads playlist ID — this is the key optimisation
+    // Using playlistItems costs 1 unit per page vs 100 units per search call
+    const uploadsPlaylistId = channel.contentDetails?.relatedPlaylists?.uploads
+    if (!uploadsPlaylistId) {
+      return res.status(400).json({ error: 'No uploads playlist found' })
+    }
 
-    // Get video list with pagination
+    // Fetch all video IDs from uploads playlist (1 unit per page of 50)
     let allVideoIds = []
     let pageToken = ''
-    for (let page = 0; page < 4; page++) {
-      const url = `https://www.googleapis.com/youtube/v3/search?part=id&channelId=${channelId}&type=video&maxResults=50&order=date${pageToken ? `&pageToken=${pageToken}` : ''}`
-      const vRes = await fetch(url, { headers: { Authorization: `Bearer ${access_token}` } })
-      const vData = await vRes.json()
-      allVideoIds.push(...(vData.items?.map(v => v.id.videoId) || []))
-      pageToken = vData.nextPageToken || ''
+    for (let page = 0; page < 8; page++) { // up to 400 videos
+      const url = `https://www.googleapis.com/youtube/v3/playlistItems?part=contentDetails&playlistId=${uploadsPlaylistId}&maxResults=50${pageToken ? `&pageToken=${pageToken}` : ''}`
+      const pRes = await fetch(url, { headers: { Authorization: `Bearer ${access_token}` } })
+      const pData = await pRes.json()
+      
+      if (!pRes.ok || !pData.items?.length) break
+      
+      allVideoIds.push(...pData.items.map(item => item.contentDetails?.videoId).filter(Boolean))
+      pageToken = pData.nextPageToken || ''
       if (!pageToken) break
     }
 
     if (!allVideoIds.length) return res.status(200).json({ videos: [], channelId, channelTitle })
 
-    // Get video details in batches of 50
+    // Get video details in batches of 50 (1 unit per batch)
     const statsMap = {}
     for (let i = 0; i < allVideoIds.length; i += 50) {
       const batch = allVideoIds.slice(i, i + 50).join(',')
@@ -72,7 +80,7 @@ export default async function handler(req, res) {
       })
     }
 
-    // Get analytics
+    // Get analytics (separate quota — 200 requests/day, this is 1 request)
     const endDate = new Date().toISOString().split('T')[0]
     const analyticsRes = await fetch(
       `https://youtubeanalytics.googleapis.com/v2/reports?ids=channel==${channelId}&startDate=2020-01-01&endDate=${endDate}&metrics=views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,impressions,impressionClickThroughRate&dimensions=video&maxResults=200&sort=-views`,
